@@ -1213,8 +1213,36 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
         return;
     }
     let Some(mut content) = render_content(layer, rect, cx) else { return };
+    let opacity = fill_into_source(layer, &mut content, opacity);
     advanced::composite_clipped(clipped, &mut content, cx);
     blend_into_g(backdrop, &content, layer.blend, opacity, text_gamma(layer));
+}
+
+/// Photoshop's "special eight" modes take Fill differently from Opacity: fill fades the layer's
+/// colour toward the mode's neutral colour before it blends (Color Burn toward white, Color
+/// Dodge toward black, ...), and only opacity mixes the result in. Measured against Photoshop
+/// on a real mockup, Color Burn and Linear Burn at 70% fill: within rounding this way (p99
+/// 0.5-0.8 levels); taken as a second opacity, 4-13 levels off. Returns the opacity to blend
+/// with -- the layer's own, or `opacity` unchanged for every other mode.
+/// ponytail: RGB neutrals; a CMYK document's would be the inverse. Hard Mix's fill is not a
+/// fade and stays a plain opacity until it is measured.
+fn fill_into_source(layer: &Layer, content: &mut Buffer, opacity: f32) -> f32 {
+    let neutral = match layer.blend {
+        BlendMode::ColorBurn | BlendMode::LinearBurn => 1.0,
+        BlendMode::ColorDodge | BlendMode::LinearDodge | BlendMode::Difference => 0.0,
+        BlendMode::VividLight | BlendMode::LinearLight => 0.5,
+        _ => return opacity,
+    };
+    let f = layer.fill_opacity;
+    if f >= 1.0 {
+        return opacity;
+    }
+    for p in &mut content.px {
+        for c in &mut p[..3] {
+            *c = neutral + (*c - neutral) * f;
+        }
+    }
+    layer.opacity
 }
 
 /// A layer with effects (and its clipping group) onto `backdrop`.
