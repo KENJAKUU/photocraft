@@ -789,6 +789,12 @@ pub fn commit_child(s: &mut Session, index: usize) -> Result<bool> {
     let Some(link) = s.smart_links.iter().find(|l| l.child == child.id).copied() else { return Ok(false) };
     let parent = s.docs.iter().position(|d| d.doc.id == link.parent).ok_or_else(|| other("the smart object's document was closed"))?;
     let bytes = Arc::new(encode_source(&child)?);
+    // Every instance re-renders from these bytes next, and the first would decode them and
+    // flatten the result: the document they were just encoded from is right here, so its
+    // flattened image goes into the source cache under their key instead. Lossless either way.
+    let fmt = s.docs[parent].doc.pixel_format();
+    let flat = photocraft_compose::flatten(&child);
+    cache_put(cache_key(&bytes, fmt), SourceImage { surface: Arc::new(buffer_to_surface(&flat, fmt)), bounds: child.bounds() });
     let prev = s.active;
     s.active = Some(parent);
     let r = s.edit("Edit Contents", |doc, _| {
