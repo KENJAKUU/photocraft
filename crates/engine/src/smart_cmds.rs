@@ -211,17 +211,51 @@ fn vector_scale(sm: &SmartObject) -> f64 {
     ((k * 16.0).ceil() / 16.0).clamp(1.0 / 16.0, 64.0)
 }
 
-/// The composited source image of `bytes` in pixel format `fmt` (decoded once, then cached).
-pub fn source_image(file_name: &str, bytes: &[u8], fmt: PixelFormat) -> Result<SourceImage> {
-    let key = cache_key(bytes, fmt);
+/// The composited source image of `bytes` as `parent` shows it (decoded once, then cached).
+pub fn source_image(file_name: &str, bytes: &[u8], parent: &Document) -> Result<SourceImage> {
+    let key = source_key(bytes, parent);
     if let Some(img) = cache_get(&key) {
         return Ok(img);
     }
     let doc = decode_source(file_name, bytes)?;
-    let buf = photocraft_compose::flatten(&doc);
-    let img = SourceImage { surface: Arc::new(buffer_to_surface(&buf, fmt)), bounds: doc.bounds() };
+    let img = flattened_for(&doc, parent)?;
     cache_put(key, img.clone());
     Ok(img)
+}
+
+/// Cache key for contents shown in `parent`: the bytes, the pixel format, and the parent's
+/// profile, which the contents are converted into.
+fn source_key(bytes: &[u8], parent: &Document) -> CacheKey {
+    let mut h = blake3::Hasher::new();
+    h.update(bytes);
+    if let Some(icc) = &parent.icc_profile {
+        h.update(b"icc:");
+        h.update(icc);
+    }
+    (*h.finalize().as_bytes(), parent.pixel_format())
+}
+
+/// Smart-object contents flattened and brought into the parent's colour space. Photoshop
+/// composites the contents in their own space and converts the result into the document's, so
+/// contents tagged with another profile (a designer's monitor profile left on a PSB is common)
+/// show the colours they were made in, not their raw numbers. Untagged contents are taken to
+/// be in the parent's space, as Photoshop assumes.
+fn flattened_for(doc: &Document, parent: &Document) -> Result<SourceImage> {
+    let fmt = parent.pixel_format();
+    let buf = photocraft_compose::flatten(doc);
+    let foreign = doc.icc_profile.is_some() && doc.mode == parent.mode && doc.icc_profile != parent.icc_profile;
+    let surface = if foreign {
+        let (src, dst) = (crate::color_cmds::document_profile(doc), crate::color_cmds::document_profile(parent));
+        if src.to_bytes() == dst.to_bytes() {
+            buffer_to_surface(&buf, fmt)
+        } else {
+            let t = photocraft_cms::Transform::new(&src, &dst, photocraft_cms::Intent::RelativeColorimetric, true).map_err(|e| other(format!("can't convert smart object contents: {e:?}")))?;
+            crate::color_cmds::convert_surface(&buffer_to_surface(&buf, doc.pixel_format()), doc.mode, fmt, &t)
+        }
+    } else {
+        buffer_to_surface(&buf, fmt)
+    };
+    Ok(SourceImage { surface: Arc::new(surface), bounds: doc.bounds() })
 }
 
 /// Layer › Smart Objects › Stack Mode: the source's layers (or, when it holds a single group, the
@@ -371,7 +405,7 @@ pub fn render(doc: &Document, sm: &SmartObject) -> Result<Option<Surface>> {
     }
     let img = match sm.stack_mode {
         Some(mode) => stack_image(&name, &bytes, doc.pixel_format(), mode)?,
-        None => source_image(&name, &bytes, doc.pixel_format())?,
+        None => source_image(&name, &bytes, doc)?,
     };
     // Through the warp (source space) and the transform in one pass; whole-pixel moves are exact.
     let placed = match &sm.perspective {
@@ -630,7 +664,7 @@ pub fn layer_to_smart(doc: &Document, l: &Layer) -> Result<Layer> {
     sub.size = Size::new(b.width(), b.height());
     let bytes = encode_source(&sub)?;
     // Seed the decode cache with the composite we already have.
-    cache_put(cache_key(&bytes, fmt), SourceImage { surface: Arc::new(translate_surface(&cache, -b.x0, -b.y0)), bounds: sub.bounds() });
+    cache_put(source_key(&bytes, doc), SourceImage { surface: Arc::new(translate_surface(&cache, -b.x0, -b.y0)), bounds: sub.bounds() });
 
     let source = SmartSource::Embedded { file_name: sub.name.clone(), bytes: Arc::new(bytes) };
     let mut out = Layer::new(
@@ -792,9 +826,8 @@ pub fn commit_child(s: &mut Session, index: usize) -> Result<bool> {
     // Every instance re-renders from these bytes next, and the first would decode them and
     // flatten the result: the document they were just encoded from is right here, so its
     // flattened image goes into the source cache under their key instead. Lossless either way.
-    let fmt = s.docs[parent].doc.pixel_format();
-    let flat = photocraft_compose::flatten(&child);
-    cache_put(cache_key(&bytes, fmt), SourceImage { surface: Arc::new(buffer_to_surface(&flat, fmt)), bounds: child.bounds() });
+    let pdoc = &s.docs[parent].doc;
+    cache_put(source_key(&bytes, pdoc), flattened_for(&child, pdoc)?);
     let prev = s.active;
     s.active = Some(parent);
     let r = s.edit("Edit Contents", |doc, _| {
