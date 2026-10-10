@@ -1227,22 +1227,25 @@ fn composite_layer_plain(layer: &Layer, clipped: &[Layer], backdrop: &mut Buffer
 /// ponytail: RGB neutrals; a CMYK document's would be the inverse. Hard Mix's fill is not a
 /// fade and stays a plain opacity until it is measured.
 fn fill_into_source(layer: &Layer, content: &mut Buffer, opacity: f32) -> f32 {
-    let neutral = match layer.blend {
-        BlendMode::ColorBurn | BlendMode::LinearBurn => 1.0,
-        BlendMode::ColorDodge | BlendMode::LinearDodge | BlendMode::Difference => 0.0,
-        BlendMode::VividLight | BlendMode::LinearLight => 0.5,
-        _ => return opacity,
-    };
-    let f = layer.fill_opacity;
-    if f >= 1.0 {
-        return opacity;
-    }
+    let Some((neutral, f)) = fill_neutral(layer) else { return opacity };
     for p in &mut content.px {
         for c in &mut p[..3] {
             *c = neutral + (*c - neutral) * f;
         }
     }
     layer.opacity
+}
+
+/// (neutral colour, fill) when `layer`'s Fill fades its colour instead of acting as an opacity
+/// (see [`fill_into_source`]); `None` for every other layer. The GPU planner asks the same.
+pub fn fill_neutral(layer: &Layer) -> Option<(f32, f32)> {
+    let neutral = match layer.blend {
+        BlendMode::ColorBurn | BlendMode::LinearBurn => 1.0,
+        BlendMode::ColorDodge | BlendMode::LinearDodge | BlendMode::Difference => 0.0,
+        BlendMode::VividLight | BlendMode::LinearLight => 0.5,
+        _ => return None,
+    };
+    (layer.fill_opacity < 1.0).then_some((neutral, layer.fill_opacity))
 }
 
 /// A layer with effects (and its clipping group) onto `backdrop`.

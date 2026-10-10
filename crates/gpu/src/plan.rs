@@ -687,7 +687,8 @@ impl<'a> Planner<'a> {
             return Ok(backdrop);
         }
         let start = self.passes.len();
-        let mut content = self.content(layer)?;
+        let content = self.content(layer)?;
+        let (mut content, opacity) = self.fill_fade(layer, content, opacity)?;
         for c in visible_clipped {
             content = self.atop(c, content)?;
         }
@@ -885,6 +886,7 @@ impl<'a> Planner<'a> {
             return self.effects(layer, &[], base, true);
         }
         let content = self.content(layer)?;
+        let (content, opacity) = self.fill_fade(layer, content, opacity)?;
         let mut p = Pass::new(Kernel::Atop, 0);
         p.a = Some(base);
         p.b = Some(content);
@@ -893,6 +895,22 @@ impl<'a> Planner<'a> {
         p.flags = gamma_flag(layer);
         p.extra[3] = photocraft_compose::text_gamma(layer);
         Ok(self.emit(p))
+    }
+
+    /// Fill on a special-eight mode fades the colour toward the mode's neutral, and only opacity
+    /// mixes it in (photocraft_compose::fill_neutral, the CPU compositor's rule). The fade is a
+    /// Levels output range, so it runs as an adjust pass. Returns the content and the opacity
+    /// to blend with; other layers come back as they were.
+    fn fill_fade(&mut self, layer: &Layer, content: Slot, opacity: f32) -> Result<(Slot, f32), Unsupported> {
+        let Some((n, f)) = photocraft_compose::fill_neutral(layer) else { return Ok((content, opacity)) };
+        let flat = photocraft_doc::adjust::LevelsChannel::default;
+        let adj = Adjustment::Levels {
+            master: photocraft_doc::adjust::LevelsChannel { out_black: n * (1.0 - f), out_white: n * (1.0 - f) + f, ..flat() },
+            per_channel: std::array::from_fn(|_| flat()),
+            space: ToneSpace::default(),
+            black: flat(),
+        };
+        Ok((self.adjust(&adj, content)?, layer.opacity))
     }
 
     /// adjust::apply_with on a slot (consumes it).
