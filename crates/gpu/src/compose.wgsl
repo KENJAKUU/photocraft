@@ -51,7 +51,8 @@ const F_LAB: u32 = 65536u;      // Lab document: Normal mixes in CIELAB
 const F_HDR: u32 = 262144u;     // 32-bit float document: Add / Divide don't clip at 1
 const F_QUANT: u32 = 32768u;    // lerp: A rounded to p0.x steps (adjustment results, integer docs)
 const F_ADD_DIFF: u32 = 16384u;  // lerp: A + (B - C) premultiplied (clips on pass-through groups)
-const F_TEXT_GAMMA: u32 = 8192u; // blend / atop / fx merge: type layer, mix coverage at gamma p4.w
+const F_TEXT_GAMMA: u32 = 8192u;
+const F_BLEND_IF: u32 = 524288u; // lerp: Blend If (Gray): B mixed back towards A // blend / atop / fx merge: type layer, mix coverage at gamma p4.w
 
 @group(0) @binding(0) var<uniform> chunk: Chunk;
 @group(0) @binding(1) var<uniform> op: Op;
@@ -785,6 +786,21 @@ fn fs_adjmix(in: VOut) -> @location(0) vec4<f32> {
     return vec4(b.rgb + (bl - b.rgb) * k, b.a);
 }
 
+// Blend If (BlendRange::weight): 0 at or below the black low point, 1 at or above its high
+// point; mirrored for white. `r` = black low, black high, white low, white high on 0..255.
+fn bif_ramp(lo: f32, hi: f32, x: f32) -> f32 {
+    if (hi <= lo) { return select(0.0, 1.0, x >= lo); }
+    return clamp((x - lo) / (hi - lo), 0.0, 1.0);
+}
+fn bif_weight(v: f32, r: vec4<f32>) -> f32 {
+    return bif_ramp(r.x, r.y, v) * bif_ramp(255.0 - r.w, 255.0 - r.z, 255.0 - v);
+}
+// Rec. 601 luma of the clamped channels, on 0..255 (compose::blend_if_weight's Gray).
+fn gray255(c: vec3<f32>) -> f32 {
+    let v = clamp(c, vec3(0.0), vec3(1.0)) * 255.0;
+    return 0.299 * v.r + 0.587 * v.g + 0.114 * v.b;
+}
+
 // Pass-through group coverage mixes premultiplied colour, then returns straight alpha.
 @fragment
 fn fs_lerp(in: VOut) -> @location(0) vec4<f32> {
@@ -796,6 +812,19 @@ fn fs_lerp(in: VOut) -> @location(0) vec4<f32> {
     }
     if ((op.flags & F_CHANNELS) != 0u) {
         return a + (b - a) * op.p0;
+    }
+    if ((op.flags & F_BLEND_IF) != 0u) {
+        // compose::apply_blend_if: how much of the layer shows, from its own colour (C, or the
+        // result B for an adjustment layer) and the colour beneath (A), mixed premultiplied.
+        var t = b;
+        if (op.p2.x > 0.5) { t = textureLoad(tex_c, p, 0); }
+        var k = 1.0;
+        if (t.a > 0.0) { k *= bif_weight(gray255(t.rgb), op.p0); }
+        if (a.a > 0.0) { k *= bif_weight(gray255(a.rgb), op.p1); }
+        if (k >= 1.0) { return b; }
+        let al = a.a + (b.a - a.a) * k;
+        if (al <= 0.0) { return vec4(0.0); }
+        return vec4(clamp((a.rgb * a.a + (b.rgb * b.a - a.rgb * a.a) * k) / al, vec3(0.0), vec3(1.0)), al);
     }
     if ((op.flags & F_ADD_DIFF) != 0u) {
         // compose: pass-through group + (with clipped − without), premultiplied.

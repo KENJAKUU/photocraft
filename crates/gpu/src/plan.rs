@@ -370,6 +370,9 @@ pub const F_QUANT: u32 = 32768;
 pub const F_ADD_DIFF: u32 = 16384;
 /// Blend / Atop / FxMerge of a type layer: coverage mixed at `psblend::TEXT_GAMMA`.
 pub const F_TEXT_GAMMA: u32 = 8192;
+/// Lerp: Blend If (Gray) -- B mixed back towards A by the ranges in p0 (this layer, judged on C
+/// when p2.x is set, else on B) and p1 (underlying, judged on A).
+pub const F_BLEND_IF: u32 = 524288;
 
 /// `F_TEXT_GAMMA` for type layers while text gamma blending is on; the gamma goes in `p4.w`.
 fn gamma_flag(layer: &Layer) -> u32 {
@@ -507,16 +510,57 @@ impl<'a> Planner<'a> {
 
     /// composite_layer, honouring the layer's channel restrictions.
     fn layer(&mut self, layer: &'a Layer, clipped: &'a [Layer], backdrop: Slot) -> Result<Slot, Unsupported> {
-        self.check_blend_if(layer)?;
+        let bif = self.blend_if_ranges(layer)?;
         self.check_advanced(layer, clipped)?;
-        match photocraft_compose::channel_weights(layer, self.cx.mode) {
+        let before = bif.map(|_| self.retain(backdrop));
+        let this = if bif.is_some() { self.blend_if_this(layer)? } else { None };
+        let after = match photocraft_compose::channel_weights(layer, self.cx.mode) {
             Some(w) => {
                 let before = self.retain(backdrop);
                 let after = self.layer_any(layer, clipped, backdrop)?;
-                Ok(self.restore_channels(before, after, w))
+                self.restore_channels(before, after, w)
             }
-            None => self.layer_any(layer, clipped, backdrop),
+            None => self.layer_any(layer, clipped, backdrop)?,
+        };
+        Ok(match (bif, before) {
+            (Some(r), Some(b)) => self.blend_if_mix(b, after, this, r),
+            _ => after,
+        })
+    }
+
+    /// Blend If's Gray ranges ([this layer, underlying], each black low/high, white low/high on
+    /// 0..255) when the layer uses them; `None` when it uses none. Per-channel (R, G, B) ranges
+    /// and non-RGB documents stay on the CPU.
+    fn blend_if_ranges(&self, layer: &Layer) -> Result<Option<[[f32; 4]; 2]>, Unsupported> {
+        if !photocraft_compose::blend_if_active(layer, self.cx.mode) {
+            return Ok(None);
         }
+        let bi = &layer.blend_if;
+        if self.cx.mode != photocraft_color::ColorMode::Rgb || (1..4).any(|i| bi.get(i).iter().any(|r| !r.is_full())) {
+            return Err(Unsupported(format!("Blend If on `{}` beyond the Gray range (composited on the CPU)", layer.name)));
+        }
+        let f = |x: photocraft_doc::BlendRange| [f32::from(x.black[0]), f32::from(x.black[1]), f32::from(x.white[0]), f32::from(x.white[1])];
+        let g = bi.get(0);
+        Ok(Some([f(g[0]), f(g[1])]))
+    }
+
+    /// The layer's own colour for "This Layer" (compose::apply_blend_if): its content, or none
+    /// for an adjustment layer, which is judged by its result.
+    fn blend_if_this(&mut self, layer: &'a Layer) -> Result<Option<Slot>, Unsupported> {
+        if matches!(layer.content, LayerContent::Adjustment(_)) { Ok(None) } else { Ok(Some(self.content(layer)?)) }
+    }
+
+    /// compose::apply_blend_if: `after` mixed back towards `before` where the ranges hide it.
+    fn blend_if_mix(&mut self, before: Slot, after: Slot, this: Option<Slot>, r: [[f32; 4]; 2]) -> Slot {
+        let mut p = Pass::new(Kernel::Lerp, 0);
+        p.params[2] = [if this.is_some() { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0];
+        p.a = Some(before);
+        p.b = Some(after);
+        p.c = this;
+        p.flags = F_BLEND_IF;
+        p.params[0] = r[0];
+        p.params[1] = r[1];
+        self.emit(p)
     }
 
     /// `compose::restore_channels`: `after` with the channels a layer leaves out taken from
@@ -857,16 +901,22 @@ impl<'a> Planner<'a> {
     /// composite_atop: `layer` onto `base`, restricted to the base's alpha, honouring the
     /// layer's channel restrictions.
     fn atop(&mut self, layer: &'a Layer, base: Slot) -> Result<Slot, Unsupported> {
-        self.check_blend_if(layer)?;
+        let bif = self.blend_if_ranges(layer)?;
         self.check_advanced(layer, &[])?;
-        match photocraft_compose::channel_weights(layer, self.cx.mode) {
+        let before = bif.map(|_| self.retain(base));
+        let this = if bif.is_some() { self.blend_if_this(layer)? } else { None };
+        let after = match photocraft_compose::channel_weights(layer, self.cx.mode) {
             Some(w) => {
                 let before = self.retain(base);
                 let after = self.atop_any(layer, base)?;
-                Ok(self.restore_channels(before, after, w))
+                self.restore_channels(before, after, w)
             }
-            None => self.atop_any(layer, base),
-        }
+            None => self.atop_any(layer, base)?,
+        };
+        Ok(match (bif, before) {
+            (Some(r), Some(b)) => self.blend_if_mix(b, after, this, r),
+            _ => after,
+        })
     }
 
     fn atop_any(&mut self, layer: &'a Layer, base: Slot) -> Result<Slot, Unsupported> {
