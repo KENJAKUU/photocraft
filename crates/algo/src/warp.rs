@@ -83,7 +83,7 @@ pub fn warp_mesh_surface(src: &Surface, src_rect: Rect, f: &(dyn Fn(f64, f64) ->
         }
         if (sx < 0.95 || sy < 0.95) && sx > 0.0 && sy > 0.0 {
             let (rx, ry) = (sx.min(1.0), sy.min(1.0));
-            let small = crate::resample::resize_surface(src, rx, ry, crate::resample::Resample::Bicubic);
+            let small = crate::resample::resize_surface(src, rx, ry, crate::resample::Resample::Lanczos);
             let g = |x: f64, y: f64| f(x / rx, y / ry);
             // The reduced source maps at about 1:1, so this does not reduce again.
             return warp_mesh_surface(&small, crate::resample::scaled_rect(src_rect, rx, ry), &g, interp);

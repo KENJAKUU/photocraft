@@ -160,7 +160,7 @@ pub fn warp_surface(src: &Surface, src_rect: Rect, h: &Homography, interp: Inter
     let reduced;
     if interp != Interp::Nearest && (fx < 0.95 || fy < 0.95) && fx > 0.0 && fy > 0.0 {
         let (rx, ry) = (fx.min(1.0), fy.min(1.0));
-        reduced = resize_surface(src, rx, ry, Resample::Bicubic);
+        reduced = resize_surface(src, rx, ry, Resample::Lanczos);
         src = &reduced;
         h = h.mul(&Homography([1.0 / rx, 0.0, 0.0, 0.0, 1.0 / ry, 0.0, 0.0, 0.0, 1.0]));
         src_rect = crate::resample::scaled_rect(src_rect, rx, ry);
