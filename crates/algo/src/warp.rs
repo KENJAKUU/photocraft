@@ -67,6 +67,28 @@ pub fn warp_mesh_surface(src: &Surface, src_rect: Rect, f: &(dyn Fn(f64, f64) ->
         let fmt = src.format();
         return Surface::new(PixelFormat::new(fmt.mode, fmt.sample, true));
     }
+    // Reduce the source to the warp's own scale first, as `transform::warp_surface` does, so
+    // the bicubic pass is about 1:1: the scale is averaged over a 9×9 grid of the source,
+    // since a warp's varies across it.
+    if interp != Interp::Nearest {
+        let (mut sx, mut sy) = (0.0, 0.0);
+        for j in 0..9 {
+            for i in 0..9 {
+                let x = f64::from(src_rect.x0) + f64::from(src_rect.width()) * (i as f64 + 0.5) / 9.0;
+                let y = f64::from(src_rect.y0) + f64::from(src_rect.height()) * (j as f64 + 0.5) / 9.0;
+                let (a, b) = crate::transform::axis_scales(f, x, y);
+                sx += a / 81.0;
+                sy += b / 81.0;
+            }
+        }
+        if (sx < 0.95 || sy < 0.95) && sx > 0.0 && sy > 0.0 {
+            let (rx, ry) = (sx.min(1.0), sy.min(1.0));
+            let small = crate::resample::resize_surface(src, rx, ry, crate::resample::Resample::Bicubic);
+            let g = |x: f64, y: f64| f(x / rx, y / ry);
+            // The reduced source maps at about 1:1, so this does not reduce again.
+            return warp_mesh_surface(&small, crate::resample::scaled_rect(src_rect, rx, ry), &g, interp);
+        }
+    }
     let (sw, sh) = (f64::from(src_rect.width()), f64::from(src_rect.height()));
     let nx = ((sw / CELL).ceil() as usize).clamp(1, MAX_CELLS);
     let ny = ((sh / CELL).ceil() as usize).clamp(1, MAX_CELLS);
