@@ -84,6 +84,9 @@ fn layer_sel(l: &Layer, selected: &[photocraft_doc::LayerId]) -> Value {
         "bounds": bounds,
         "selected": selected.contains(&l.id),
         "linkGroup": l.link_group,
+        // The padlocks, as Photoshop's `lspf` set them: automation that edits a smart object's
+        // contents leaves a locked layer alone the way a designer meant it.
+        "locks": l.locks,
     });
     match &l.content {
         LayerContent::Group(g) => {
