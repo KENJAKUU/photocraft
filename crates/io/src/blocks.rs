@@ -547,7 +547,16 @@ pub fn parse_placed_warp(key: &[u8; 4], data: &[u8]) -> Option<photocraft_geom::
         if xs.len() != 16 || ys.len() != 16 {
             return None;
         }
-        let mesh = BezierMesh { us: vec![0.0, 1.0], vs: vec![0.0, 1.0], points: xs.iter().zip(&ys).map(|(x, y)| [*x, *y]).collect() };
+        // Photoshop fits the mesh to the placed layer's transform box by the bounding box of its
+        // 16 control points, not by their raw coordinates: that box, not the warp bounds, is
+        // what the `Trnf` corners are. Measured against Photoshop's own renders (a dot grid
+        // through two real mockups): raw points land 4-27 px off, the control-point box 0.3-0.8 px
+        // (the warped surface's own bounding box does worse, 9.7 px).
+        let (x0, x1) = xs.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        let (y0, y1) = ys.iter().fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        let fit = |v: f64, lo: f64, hi: f64, to_lo: f64, to_hi: f64| if hi - lo > 1e-9 { to_lo + (v - lo) * (to_hi - to_lo) / (hi - lo) } else { v };
+        let points = xs.iter().zip(&ys).map(|(x, y)| [fit(*x, x0, x1, bounds[0], bounds[2]), fit(*y, y0, y1, bounds[1], bounds[3])]).collect();
+        let mesh = BezierMesh { us: vec![0.0, 1.0], vs: vec![0.0, 1.0], points };
         warp.mesh = mesh.is_valid().then_some(mesh);
         warp.mesh.as_ref()?;
     }
@@ -782,7 +791,10 @@ mod tests {
         );
         let w = parse_placed_warp(b"SoLd", &sold(custom)).unwrap();
         assert_eq!(w.style, WarpStyle::Custom);
-        assert_eq!(w.mesh.as_ref().unwrap().points[15], [67.0, 30.0]);
+        // The control points' bounding box (x 0..67) is fitted to the bounds (0..60), as
+        // Photoshop does: the corner that stuck out lands on the bounds' corner.
+        assert_eq!(w.mesh.as_ref().unwrap().points[15], [60.0, 30.0]);
+        assert_eq!(w.mesh.as_ref().unwrap().points[1], [20.0 * 60.0 / 67.0, 0.0]);
         assert!(parse_placed_warp(b"PlLd", &[0; 20]).is_none());
     }
 

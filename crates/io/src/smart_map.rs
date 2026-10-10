@@ -1015,8 +1015,11 @@ mod tests {
     fn warps_are_written_and_read_back() {
         use photocraft_geom::warp::BezierMesh;
         let bounds = [0.0, 0.0, 60.0, 30.0];
+        // An interior point moved: a mesh inside its bounds reads back as written. (One whose
+        // control points stick out is fitted back into the bounds on reading, as Photoshop
+        // reads it.) ponytail: writing such a mesh does not widen `Trnf` to match.
         let mut custom = BezierMesh::identity(bounds, 1, 1);
-        custom.points[15] = [67.0, 30.0];
+        custom.points[5] = [25.0, 12.0];
         let mut multi = Warp::preset(WarpStyle::Custom, 0.0, bounds);
         multi.mesh = Some(BezierMesh::identity(bounds, 2, 2));
         let mut arc = Warp::preset(WarpStyle::Arc, 40.0, bounds);
